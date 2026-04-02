@@ -26,42 +26,37 @@ def parse_location(location):
 
     loc = loc.replace("POINT", "").replace("(", "").replace(")", "").strip()
 
-    # Try comma-separated
     if "," in loc:
         parts = [p.strip() for p in loc.split(",")]
-        if len(parts) == 2:
-            a = to_float(parts[0])
-            b = to_float(parts[1])
-            if a is not None and b is not None:
-                # lat,lng
-                if -90 <= a <= 90 and -180 <= b <= 180:
-                    return b, a
-                # lng,lat
-                if -180 <= a <= 180 and -90 <= b <= 90:
-                    return a, b
+    else:
+        parts = loc.split()
 
-    # Try space-separated
-    parts = loc.split()
-    if len(parts) == 2:
-        a = to_float(parts[0])
-        b = to_float(parts[1])
-        if a is not None and b is not None:
-            if -180 <= a <= 180 and -90 <= b <= 90:
-                return a, b
-            if -90 <= a <= 90 and -180 <= b <= 180:
-                return b, a
+    if len(parts) != 2:
+        return None, None
+
+    a = to_float(parts[0])
+    b = to_float(parts[1])
+    if a is None or b is None:
+        return None, None
+
+    # lat,lng
+    if -90 <= a <= 90 and -180 <= b <= 180:
+        return b, a
+
+    # lng,lat
+    if -180 <= a <= 180 and -90 <= b <= 90:
+        return a, b
 
     return None, None
 
 def get_lng_lat(row):
-    # Best source first
     lng, lat = parse_location(row.get("LOCATION"))
     if lng is not None and lat is not None:
         return lng, lat
 
-    # Fallback only if X/Y already look like lon/lat
     x = to_float(row.get("X_COORD"))
     y = to_float(row.get("Y_COORD"))
+
     if x is not None and y is not None:
         if -180 <= x <= 180 and -90 <= y <= 90:
             return x, y
@@ -78,29 +73,29 @@ def classify_permit(row):
 
     text = f"{permit_type} {work_type} {project_name} {address}"
 
-    # Exclude obvious non-building or trade-only permits
+    # throw out obvious non-building/trade-only noise
     exclude_terms = [
         "garage sale",
         "mechanical",
         "electrical",
         "plumbing",
-        "mep",
-        "solar photovoltaic"
+        "solar photovoltaic",
+        "mep"
     ]
     if any(term in text for term in exclude_terms):
         return None
 
     residential_terms = [
         "single family", "single-family", "residential", "residence",
-        "house", "home", "duplex", "townhome", "townhome", "town house",
-        "multi-family", "multifamily", "apartment", "condo", "condominium"
+        "house", "home", "duplex", "triplex", "townhome", "town house",
+        "condo", "condominium", "apartment", "multi-family", "multifamily"
     ]
 
     commercial_terms = [
         "commercial", "comm new building permit", "office", "retail",
         "warehouse", "restaurant", "medical", "school", "hotel",
         "shell building", "tenant finish", "tenant improvement",
-        "industrial", "church", "bank", "storage", "hospital"
+        "industrial", "church", "bank", "hospital", "storage"
     ]
 
     if any(term in text for term in commercial_terms):
@@ -109,9 +104,12 @@ def classify_permit(row):
     if any(term in text for term in residential_terms):
         return "residential"
 
-    # Keep remaining building permits, but don't force them into a bucket
+    # fallback: if it is clearly a building permit, force a category
     if "building permit" in text or "building" in permit_type:
-        return "other_building"
+        # light heuristic
+        if any(term in text for term in ["unit", "res", "residence", "home", "house"]):
+            return "residential"
+        return "commercial"
 
     return None
 
