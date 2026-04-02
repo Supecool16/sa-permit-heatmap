@@ -22,7 +22,7 @@ jobs:
           node-version: "20"
 
       - name: Refresh permit data
-        run: node scripts/refresh-permits.mjs
+        run: node refresh-permits.mjs
 
       - name: Commit updated JSON
         run: |
