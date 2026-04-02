@@ -1,4 +1,3 @@
-# refresh_permits.py
 import csv
 import json
 import requests
@@ -9,7 +8,6 @@ OUTPUT_FILE = "san-antonio-permits.json"
 
 def is_building_permit(row):
     permit_type = (row.get("PERMIT TYPE") or "").strip().lower()
-    # Adjust this logic after you inspect the actual permit type values
     exclude_terms = ["garage sale", "mechanical", "electrical", "plumbing"]
     return permit_type and not any(term in permit_type for term in exclude_terms)
 
@@ -30,11 +28,9 @@ for row in reader:
     x = to_float(row.get("X_COORD"))
     y = to_float(row.get("Y_COORD"))
 
-    # Skip records without usable coordinates
     if x is None or y is None:
         continue
 
-    # Optional: keep only actual building permits
     if not is_building_permit(row):
         continue
 
