@@ -21,9 +21,7 @@ def to_float(value):
 
 def normalize_date(value):
     s = clean_text(value)
-    if not s:
-        return ""
-    return s[:10]
+    return s[:10] if s else ""
 
 
 def parse_location(location):
@@ -33,21 +31,19 @@ def parse_location(location):
 
     loc = loc.replace("POINT", "").replace("(", " ").replace(")", " ").replace(",", " ")
     parts = [p for p in loc.split() if p]
-
     if len(parts) != 2:
         return None, None
 
     a = to_float(parts[0])
     b = to_float(parts[1])
-
     if a is None or b is None:
         return None, None
 
-    # lat, lng
+    # lat,lng
     if -90 <= a <= 90 and -180 <= b <= 180:
         return b, a
 
-    # lng, lat
+    # lng,lat
     if -180 <= a <= 180 and -90 <= b <= 90:
         return a, b
 
@@ -71,127 +67,107 @@ def get_lng_lat(row):
     return None, None
 
 
-def joined_text(row):
-    fields = [
-        row.get("PERMIT TYPE"),
-        row.get("WORK TYPE"),
-        row.get("PROJECT NAME"),
-        row.get("ADDRESS"),
-        row.get("DESCRIPTION"),
-        row.get("SCOPE OF WORK"),
-        row.get("PERMIT DESCRIPTION"),
-        row.get("PROJECT DESCRIPTION"),
+def get_text_fields(row):
+    permit_type = clean_text(row.get("PERMIT TYPE")).lower()
+    work_type = clean_text(row.get("WORK TYPE")).lower()
+    project_name = clean_text(row.get("PROJECT NAME")).lower()
+    address = clean_text(row.get("ADDRESS")).lower()
+    return permit_type, work_type, project_name, address
+
+
+def is_trade_only_permit(permit_type):
+    trade_terms = [
+        "mechanical",
+        "electrical",
+        "plumbing",
+        "fire",
+        "irrigation",
+        "sign",
+        "demolition",
+        "garage sale"
     ]
-    return " ".join(clean_text(v).lower() for v in fields if clean_text(v))
-
-
-def is_building_permit(row):
-    text = joined_text(row)
-    return "building" in text
+    return any(term in permit_type for term in trade_terms)
 
 
 def is_new_build_permit(row):
-    """
-    Keep only true new construction / new building permits.
-    Exclude remodels, repairs, additions, tenant finish-outs, etc.
-    """
-    text = joined_text(row)
+    permit_type, work_type, project_name, _ = get_text_fields(row)
+    text = f"{permit_type} {work_type} {project_name}"
 
-    include_terms = [
-        "new construction",
-        "new building",
-        "new commercial",
-        "new residential",
-        "construction of",
-        "construct new",
-        "ground up",
-        "ground-up",
-        "shell building",
-        "new shell",
-        "new single family",
-        "new single-family",
-        "new residence",
-        "new home",
-        "new duplex",
-        "new triplex",
-        "new townhome",
-        "new apartment",
-        "new multifamily",
-        "new multi-family",
-    ]
+    if is_trade_only_permit(permit_type):
+        return False
 
     exclude_terms = [
         "remodel",
         "renovation",
         "repair",
-        "replace",
-        "re-roof",
-        "reroof",
-        "roof",
         "addition",
         "alteration",
-        "interior finish out",
-        "interior finish-out",
         "finish out",
         "finish-out",
         "tenant finish",
         "tenant improvement",
-        "t.i.",
-        "fit out",
-        "fit-out",
+        "interior finish",
         "conversion",
         "demo",
         "demolition",
-        "pool",
-        "fence",
-        "sign",
-        "plumbing",
-        "mechanical",
-        "electrical",
+        "roof",
+        "re-roof",
+        "reroof",
         "foundation repair",
-        "fire repair",
-        "temporary",
-        "solar",
+        "fence",
+        "pool",
         "carport",
-        "garage conversion",
+        "garage",
+        "solar"
     ]
-
-    if not is_building_permit(row):
-        return False
-
     if any(term in text for term in exclude_terms):
         return False
 
-    if any(term in text for term in include_terms):
+    # Primary detection: WORK TYPE indicates new construction/new build
+    new_work_terms = [
+        "new",
+        "new construction",
+        "new building",
+        "new build",
+        "construction"
+    ]
+    if any(term in work_type for term in new_work_terms):
         return True
 
-    # fallback heuristics: allow obvious "new" phrasing
-    if "new" in text and any(
-        term in text for term in [
-            "building", "construction", "residence", "home",
-            "single family", "single-family", "duplex",
-            "apartment", "multifamily", "multi-family", "office",
-            "retail", "warehouse", "restaurant", "school", "hotel"
-        ]
-    ):
+    # Secondary fallback: project or permit naming convention indicates new build
+    new_project_terms = [
+        "new single family",
+        "new single-family",
+        "new residence",
+        "new home",
+        "new duplex",
+        "new townhome",
+        "new apartment",
+        "new commercial",
+        "new office",
+        "new retail",
+        "new warehouse",
+        "ground up",
+        "ground-up",
+        "shell building"
+    ]
+    if any(term in text for term in new_project_terms):
         return True
 
     return False
 
 
 def classify_permit(row):
-    """
-    Force every kept NEW BUILD permit into either commercial or residential.
-    """
-    text = joined_text(row)
+    permit_type, work_type, project_name, address = get_text_fields(row)
+    text = f"{permit_type} {work_type} {project_name} {address}"
 
     residential_terms = [
         "residential",
         "single family",
         "single-family",
         "residence",
-        "house",
         "home",
+        "house",
         "duplex",
         "triplex",
         "quadplex",
@@ -202,9 +178,7 @@ def classify_permit(row):
         "apartment",
         "apartments",
         "multi-family",
-        "multifamily",
-        "sf residential",
-        "mf residential",
+        "multifamily"
     ]
 
     commercial_terms = [
@@ -222,9 +196,7 @@ def classify_permit(row):
         "bank",
         "hospital",
         "storage",
-        "clubhouse",
-        "shell building",
-        "tenant space",
+        "shell"
     ]
 
     if any(term in text for term in residential_terms):
@@ -233,8 +205,12 @@ def classify_permit(row):
     if any(term in text for term in commercial_terms):
         return "commercial"
 
-    # fallback: for new-build permits, default to commercial only if
-    # nothing clearly signals residential
+    # fallback:
+    # if permit/work text mentions residential permit family, keep residential,
+    # otherwise default to commercial
+    if "res" in permit_type or "res" in work_type:
+        return "residential"
+
     return "commercial"
 
 
@@ -260,7 +236,6 @@ for row in reader:
 
     permit_number = clean_text(row.get("PERMIT #"))
     date_issued = normalize_date(row.get("DATE ISSUED"))
-
     if not date_issued:
         continue
 
