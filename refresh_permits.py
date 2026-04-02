@@ -1,170 +1,145 @@
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+import csv
+import json
+import requests
+from datetime import datetime
 
-<div style="font-family: Arial, sans-serif; max-width: 100%;">
-  <div style="margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
-    <button id="showSingle" style="padding: 8px 12px; border: 1px solid #ccc; background: white; cursor: pointer;">Single-Family</button>
-    <button id="showCommercial" style="padding: 8px 12px; border: 1px solid #ccc; background: white; cursor: pointer;">Commercial</button>
-    <button id="showBoth" style="padding: 8px 12px; border: 1px solid #ccc; background: #222; color: white; cursor: pointer;">Both</button>
+URLS = [
+    "https://data.sanantonio.gov/dataset/05012dcb-ba1b-4ade-b5f3-7403bc7f52eb/resource/c22b1ef2-dcf8-4d77-be1a-ee3638092aab/download/permits_issued_ending_12312024.csv",
+    "https://data.sanantonio.gov/dataset/05012dcb-ba1b-4ade-b5f3-7403bc7f52eb/resource/c21106f9-3ef5-4f3a-8604-f992b4db7512/download/permits_issued.csv",
+]
+OUTPUT_FILE = "san-antonio-permits.json"
 
-    <label style="margin-left: 10px; font-size: 14px;">Begin Date</label>
-    <input id="beginDate" type="date" style="padding: 8px; border: 1px solid #ccc; border-radius: 6px;" />
+def clean_text(value):
+    return (value or "").strip()
 
-    <label style="font-size: 14px;">End Date</label>
-    <input id="endDate" type="date" style="padding: 8px; border: 1px solid #ccc; border-radius: 6px;" />
+def to_float(value):
+    try:
+        return float(str(value).replace(",", "").strip())
+    except:
+        return None
 
-    <button id="applyDates" style="padding: 8px 12px; border: 1px solid #ccc; background: white; cursor: pointer;">Apply Dates</button>
-    <button id="clearDates" style="padding: 8px 12px; border: 1px solid #ccc; background: white; cursor: pointer;">Clear Dates</button>
-  </div>
+def parse_location(location):
+    # Common CKAN geo format: "(29.4241, -98.4936)"
+    loc = clean_text(location)
+    if not loc:
+        return None, None
 
-  <div id="summary" style="margin-bottom: 10px; font-size: 14px; color: #333;"></div>
+    loc = loc.replace("POINT", "").replace("(", "").replace(")", "").strip()
+    parts = [p.strip() for p in loc.split(",")]
 
-  <div id="map" style="height: 650px; width: 100%; border-radius: 12px;"></div>
+    if len(parts) == 2:
+        a = to_float(parts[0])
+        b = to_float(parts[1])
 
-  <div style="margin-top: 10px; background: rgba(255,255,255,0.92); padding: 10px 12px; border: 1px solid #ddd; border-radius: 10px; display: inline-block;">
-    <div style="font-weight: 700; margin-bottom: 6px;">Heat Intensity</div>
-    <div style="display: flex; align-items: center; gap: 8px;">
-      <span style="font-size: 12px;">Lower</span>
-      <div style="width: 180px; height: 14px; border-radius: 8px; background: linear-gradient(to right, rgba(59,130,246,0.35), rgba(34,197,94,0.45), rgba(234,179,8,0.55), rgba(249,115,22,0.65), rgba(220,38,38,0.75)); border: 1px solid #ccc;"></div>
-      <span style="font-size: 12px;">Higher</span>
-    </div>
-    <div style="font-size: 12px; color: #555; margin-top: 6px;">
-      Heat is based on permit concentration and valuation weighting.
-    </div>
-  </div>
-</div>
+        # Try lat,lng
+        if a is not None and b is not None:
+            if -90 <= a <= 90 and -180 <= b <= 180:
+                return b, a
+            if -90 <= b <= 90 and -180 <= a <= 180:
+                return a, b
 
-<script>
-const map = L.map('map').setView([29.4241, -98.4936], 10);
+    # Also try space-separated POINT style
+    parts = loc.split()
+    if len(parts) == 2:
+        a = to_float(parts[0])
+        b = to_float(parts[1])
+        if a is not None and b is not None:
+            if -180 <= a <= 180 and -90 <= b <= 90:
+                return a, b
+            if -180 <= b <= 180 and -90 <= a <= 90:
+                return b, a
 
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '&copy; OpenStreetMap contributors'
-}).addTo(map);
+    return None, None
 
-let allPoints = [];
-let heatLayer = null;
-let currentCategory = 'both';
+def classify_permit(row):
+    permit_type = clean_text(row.get("PERMIT TYPE")).lower()
+    work_type = clean_text(row.get("WORK TYPE")).lower()
+    project_name = clean_text(row.get("PROJECT NAME")).lower()
 
-function getWeight(p) {
-  const valuation = parseFloat(p.valuation || 0);
-  return Math.max(0.15, Math.min(valuation / 1000000, 0.9));
+    text = f"{permit_type} {work_type} {project_name}"
+
+    single_family_terms = [
+        "single family", "single-family", "new residence",
+        "new single family", "1-family", "one-family"
+    ]
+    commercial_terms = [
+        "comm new building permit", "commercial", "office", "retail",
+        "warehouse", "restaurant", "medical", "school", "hotel",
+        "shell building", "apartments"
+    ]
+
+    if any(term in text for term in single_family_terms):
+        return "single_family"
+    if any(term in text for term in commercial_terms):
+        return "commercial"
+    return None
+
+def get_lng_lat(row):
+    # First try LOCATION
+    lng, lat = parse_location(row.get("LOCATION"))
+    if lng is not None and lat is not None:
+        return lng, lat
+
+    # Then try direct lat/lng-style X/Y only if they look valid
+    x = to_float(row.get("X_COORD"))
+    y = to_float(row.get("Y_COORD"))
+
+    if x is not None and y is not None:
+        if -180 <= x <= 180 and -90 <= y <= 90:
+            return x, y
+        if -180 <= y <= 180 and -90 <= x <= 90:
+            return y, x
+
+    return None, None
+
+seen = set()
+points = []
+
+for url in URLS:
+    r = requests.get(url, timeout=180)
+    r.raise_for_status()
+
+    reader = csv.DictReader(r.text.splitlines())
+
+    for row in reader:
+        category = classify_permit(row)
+        if category is None:
+            continue
+
+        lng, lat = get_lng_lat(row)
+        if lng is None or lat is None:
+            continue
+
+        permit_number = clean_text(row.get("PERMIT #"))
+        date_issued = clean_text(row.get("DATE ISSUED"))
+        dedupe_key = (permit_number, date_issued)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+
+        valuation = to_float(row.get("DECLARED VALUATION")) or 0
+
+        points.append({
+            "lng": lng,
+            "lat": lat,
+            "category": category,
+            "permit_type": clean_text(row.get("PERMIT TYPE")),
+            "permit_number": permit_number,
+            "project_name": clean_text(row.get("PROJECT NAME")),
+            "work_type": clean_text(row.get("WORK TYPE")),
+            "address": clean_text(row.get("ADDRESS")),
+            "date_issued": date_issued[:10],
+            "valuation": valuation
+        })
+
+payload = {
+    "updated_at": datetime.utcnow().isoformat() + "Z",
+    "source": "City of San Antonio Open Data",
+    "count": len(points),
+    "points": points
 }
 
-function parsePermitDate(dateStr) {
-  if (!dateStr) return null;
-  const d = new Date(dateStr);
-  return isNaN(d.getTime()) ? null : d;
-}
+with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+    json.dump(payload, f)
 
-function getFilteredPoints() {
-  let filtered = allPoints;
-
-  if (currentCategory === 'single_family') {
-    filtered = filtered.filter(p => p.category === 'single_family');
-  } else if (currentCategory === 'commercial') {
-    filtered = filtered.filter(p => p.category === 'commercial');
-  }
-
-  const beginValue = document.getElementById('beginDate').value;
-  const endValue = document.getElementById('endDate').value;
-
-  const beginDate = beginValue ? new Date(beginValue + 'T00:00:00') : null;
-  const endDate = endValue ? new Date(endValue + 'T23:59:59') : null;
-
-  if (beginDate) {
-    filtered = filtered.filter(p => {
-      const d = parsePermitDate(p.date_issued);
-      return d && d >= beginDate;
-    });
-  }
-
-  if (endDate) {
-    filtered = filtered.filter(p => {
-      const d = parsePermitDate(p.date_issued);
-      return d && d <= endDate;
-    });
-  }
-
-  return filtered;
-}
-
-function updateSummary(filtered) {
-  const categoryLabel =
-    currentCategory === 'single_family' ? 'Single-Family' :
-    currentCategory === 'commercial' ? 'Commercial' : 'Both';
-
-  const beginValue = document.getElementById('beginDate').value;
-  const endValue = document.getElementById('endDate').value;
-
-  let text = `<strong>${filtered.length.toLocaleString()}</strong> permits shown | Category: <strong>${categoryLabel}</strong>`;
-
-  if (beginValue || endValue) {
-    text += ` | Date Range: <strong>${beginValue || 'Any'}</strong> to <strong>${endValue || 'Any'}</strong>`;
-  }
-
-  document.getElementById('summary').innerHTML = text;
-}
-
-function drawHeat() {
-  if (heatLayer) {
-    map.removeLayer(heatLayer);
-  }
-
-  const filtered = getFilteredPoints();
-  updateSummary(filtered);
-
-  const heatPoints = filtered.map(p => [p.lat, p.lng, getWeight(p)]);
-
-  heatLayer = L.heatLayer(heatPoints, {
-    radius: 18,
-    blur: 14,
-    maxZoom: 15,
-    minOpacity: 0.18,
-    gradient: {
-      0.20: '#3b82f6',
-      0.40: '#22c55e',
-      0.60: '#eab308',
-      0.80: '#f97316',
-      1.00: '#dc2626'
-    }
-  }).addTo(map);
-}
-
-fetch("https://supecool16.github.io/sa-permit-heatmap/san-antonio-permits.json")
-  .then(res => res.json())
-  .then(data => {
-    allPoints = data.points.filter(p =>
-      typeof p.lat === "number" &&
-      typeof p.lng === "number" &&
-      p.lat >= -90 && p.lat <= 90 &&
-      p.lng >= -180 && p.lng <= 180
-    );
-
-    drawHeat();
-  })
-  .catch(err => console.error("Map failed:", err));
-
-document.getElementById('showSingle').addEventListener('click', () => {
-  currentCategory = 'single_family';
-  drawHeat();
-});
-
-document.getElementById('showCommercial').addEventListener('click', () => {
-  currentCategory = 'commercial';
-  drawHeat();
-});
-
-document.getElementById('showBoth').addEventListener('click', () => {
-  currentCategory = 'both';
-  drawHeat();
-});
-
-document.getElementById('applyDates').addEventListener('click', drawHeat);
-
-document.getElementById('clearDates').addEventListener('click', () => {
-  document.getElementById('beginDate').value = '';
-  document.getElementById('endDate').value = '';
-  drawHeat();
-});
-</script>
+print(f"Wrote {len(points)} points to {OUTPUT_FILE}")
