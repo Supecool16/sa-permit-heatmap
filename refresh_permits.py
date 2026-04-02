@@ -5,7 +5,7 @@ from datetime import datetime
 from collections import defaultdict
 
 SOURCE_URL = "https://data.sanantonio.gov/dataset/05012dcb-ba1b-4ade-b5f3-7403bc7f52eb/resource/c21106f9-3ef5-4f3a-8604-f992b4db7512/download/permits_issued.csv"
-OUTPUT_FILE = "san-antonio-new-build-permits.json"
+OUTPUT_FILE = "san-antonio-permits.json"
 
 
 def clean_text(value):
@@ -39,11 +39,9 @@ def parse_location(location):
     if a is None or b is None:
         return None, None
 
-    # lat,lng
     if -90 <= a <= 90 and -180 <= b <= 180:
         return b, a
 
-    # lng,lat
     if -180 <= a <= 180 and -90 <= b <= 90:
         return a, b
 
@@ -75,88 +73,6 @@ def get_text_fields(row):
     return permit_type, work_type, project_name, address
 
 
-def is_trade_only_permit(permit_type):
-    trade_terms = [
-        "mechanical",
-        "electrical",
-        "plumbing",
-        "fire",
-        "irrigation",
-        "sign",
-        "demolition",
-        "garage sale"
-    ]
-    return any(term in permit_type for term in trade_terms)
-
-
-def is_new_build_permit(row):
-    permit_type, work_type, project_name, _ = get_text_fields(row)
-    text = f"{permit_type} {work_type} {project_name}"
-
-    if is_trade_only_permit(permit_type):
-        return False
-
-    exclude_terms = [
-        "remodel",
-        "renovation",
-        "repair",
-        "addition",
-        "alteration",
-        "finish out",
-        "finish-out",
-        "tenant finish",
-        "tenant improvement",
-        "interior finish",
-        "conversion",
-        "demo",
-        "demolition",
-        "roof",
-        "re-roof",
-        "reroof",
-        "foundation repair",
-        "fence",
-        "pool",
-        "carport",
-        "garage",
-        "solar"
-    ]
-    if any(term in text for term in exclude_terms):
-        return False
-
-    # Primary detection: WORK TYPE indicates new construction/new build
-    new_work_terms = [
-        "new",
-        "new construction",
-        "new building",
-        "new build",
-        "construction"
-    ]
-    if any(term in work_type for term in new_work_terms):
-        return True
-
-    # Secondary fallback: project or permit naming convention indicates new build
-    new_project_terms = [
-        "new single family",
-        "new single-family",
-        "new residence",
-        "new home",
-        "new duplex",
-        "new townhome",
-        "new apartment",
-        "new commercial",
-        "new office",
-        "new retail",
-        "new warehouse",
-        "ground up",
-        "ground-up",
-        "shell building"
-    ]
-    if any(term in text for term in new_project_terms):
-        return True
-
-    return False
-
-
 def classify_permit(row):
     permit_type, work_type, project_name, address = get_text_fields(row)
     text = f"{permit_type} {work_type} {project_name} {address}"
@@ -181,37 +97,88 @@ def classify_permit(row):
         "multifamily"
     ]
 
-    commercial_terms = [
+    if any(term in text for term in residential_terms):
+        return "residential"
+
+    return "commercial"
+
+
+def is_new_build_permit(row):
+    permit_type, work_type, project_name, _ = get_text_fields(row)
+    text = f"{permit_type} {work_type} {project_name}"
+
+    # hard excludes
+    exclude_terms = [
+        "remodel",
+        "renovation",
+        "repair",
+        "addition",
+        "alteration",
+        "finish out",
+        "finish-out",
+        "tenant finish",
+        "tenant improvement",
+        "interior finish",
+        "conversion",
+        "demo",
+        "demolition",
+        "roof",
+        "re-roof",
+        "reroof",
+        "foundation repair",
+        "fence",
+        "pool",
+        "carport",
+        "solar",
+        "electrical",
+        "mechanical",
+        "plumbing",
+        "sign"
+    ]
+    if any(term in text for term in exclude_terms):
+        return False
+
+    # clear new-build indicators
+    include_terms = [
+        "new",
+        "new construction",
+        "new building",
+        "new build",
+        "ground up",
+        "ground-up",
+        "shell"
+    ]
+    if any(term in text for term in include_terms):
+        return True
+
+    # fallback for older rows:
+    # if it's a building permit, has meaningful valuation, and is not excluded,
+    # keep it when it looks like a principal structure
+    building_terms = [
+        "building",
+        "residential",
         "commercial",
+        "single family",
+        "single-family",
+        "duplex",
+        "apartment",
+        "multifamily",
+        "multi-family",
         "office",
         "retail",
         "warehouse",
         "restaurant",
-        "medical",
         "school",
-        "hotel",
-        "motel",
-        "industrial",
-        "church",
-        "bank",
-        "hospital",
-        "storage",
-        "shell"
+        "hotel"
     ]
 
-    if any(term in text for term in residential_terms):
-        return "residential"
+    valuation = to_float(row.get("DECLARED VALUATION")) or 0
+    area = to_float(row.get("AREA (SF)")) or 0
 
-    if any(term in text for term in commercial_terms):
-        return "commercial"
+    if any(term in text for term in building_terms) and (valuation >= 50000 or area >= 500):
+        return True
 
-    # fallback:
-    # if permit/work text mentions residential permit family, keep residential,
-    # otherwise default to commercial
-    if "res" in permit_type or "res" in work_type:
-        return "residential"
-
-    return "commercial"
+    return False
 
 
 response = requests.get(SOURCE_URL, timeout=180)
@@ -271,7 +238,7 @@ for row in reader:
 payload = {
     "updated_at": datetime.utcnow().isoformat() + "Z",
     "source": "City of San Antonio Open Data",
-    "scope": "new_builds_only",
+    "scope": "new_builds_only_relaxed",
     "count": len(points),
     "category_counts": category_counts,
     "year_counts": dict(sorted(year_counts.items())),
@@ -285,4 +252,3 @@ with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
 print(f"Wrote {len(points)} points to {OUTPUT_FILE}")
 print("Category counts:", category_counts)
 print("Year counts:", dict(sorted(year_counts.items())))
-print("Month counts:", {k: month_counts[k] for k in sorted(month_counts.keys())})
